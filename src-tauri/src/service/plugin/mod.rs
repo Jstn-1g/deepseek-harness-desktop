@@ -25,13 +25,15 @@
 mod cancel;
 mod install;
 mod installed;
+mod manage;
 mod preset;
 mod process;
 pub mod watch;
 
 pub use cancel::cancel;
-pub use install::install;
+pub use install::{install, PreinstallResult};
 pub use installed::{list, PreinstallPlugin};
+pub use manage::{remove, upgrade};
 pub use preset::repo_url_of;
 pub(crate) use preset::{current_preset_hash, preinstall_pending};
 pub use watch::DshPlugin;

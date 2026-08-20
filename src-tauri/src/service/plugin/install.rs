@@ -1,6 +1,8 @@
 //! 预装插件安装：校验选中项、准备环境（pnpm/dsh shim、按需补齐捆绑 pnpm、
-//! 停止运行中的服务），随后调用 `dsh plugin --profile web add <specs...>`，
-//! 成功后执行 Windows 极简模式专项修复。
+//! 停止运行中的服务），随后**逐个**调用 `dsh plugin --profile web add <spec>`，
+//! 单个插件失败不阻断其余插件（issue #45）；全部结束后执行 Windows 极简模式
+//! 专项修复。每个插件返回独立结果（id/成功/失败原因），前端可据此展示行内
+//! 状态、失败汇总与按项重试。
 //!
 //! pnpm v11 对两类构建脚本默认不放行、缺白名单时报硬错误：
 //! 1. git 托管插件的 `prepare` 构建（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）——
@@ -8,24 +10,28 @@
 //!    （git+ssh#sha / codeload tar.gz），无法预先确定；
 //! 2. 传递依赖的原生构建（如 `node-pty`，`ERR_PNPM_IGNORED_BUILDS`）。
 //! 因此在安装失败时从 pnpm 错误输出解析它建议的 `allowBuilds` 键，写入 profile
-//! 的 `pnpm-workspace.yaml` 后重试，直至成功或无可解析项。
+//! 的 `pnpm-workspace.yaml` 后重试，直至成功或无可解析项。逐插件安装时每次
+//! 失败输出只对应一个插件，解析/重试更可靠。
+
+use serde::Serialize;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use crate::config;
 use crate::service::cli;
 use crate::service::download;
 use crate::service::download::Installable;
 use crate::service::workflow;
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use super::installed::{PREINSTALL_PROFILE, profile_dir};
-use super::preset::load_presets;
+use super::preset::{load_presets, PreinstallPluginInfo};
 use super::process::{run_plugin_process, PreinstallLogPayload, PREINSTALL_LOG_EVENT};
 
 /// 允许构建重试的上限。每次重试解决 pnpm 报出的一个允许键（git depPath 或
-/// 传递构建包名），多个 git 插件 / 多个原生依赖各占一次，上限封顶防死循环。
+/// 传递构建包名），多个原生依赖各占一次，上限封顶防死循环。
 const MAX_ALLOW_LIST_RETRIES: usize = 8;
 
 /// 可安全用于插件安装的用户 pnpm 最低主版本。
@@ -36,25 +42,83 @@ const MAX_ALLOW_LIST_RETRIES: usize = 8;
 /// 自动合成 peer 后 `No matching version found for @deepseek-ai/...` 的假失败。
 const MIN_TRUSTED_PNPM_MAJOR: u32 = 10;
 
-/// 校验并安装选中的预装插件：`dsh plugin --profile web add <ids...>`
-pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), String> {
+/// 前端监听的行内安装状态事件名（按插件 id 推送 installing/success/failed）
+pub(crate) const PREINSTALL_STATUS_EVENT: &str = "preinstall-plugin-status";
+
+/// 行内安装状态事件载荷
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreinstallStatusPayload {
+    pub id: String,
+    /// installing | success | failed
+    pub status: String,
+    /// 失败原因（仅 failed 时携带）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// 单个预装插件的安装结果（前端失败汇总与按项重试用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreinstallResult {
+    pub id: String,
+    pub name: String,
+    pub success: bool,
+    /// 失败原因（成功时为 null）
+    pub error: Option<String>,
+}
+
+/// 全局取消标记：`cancel` 命令置位后，安装循环在下一个插件前退出；
+/// 已完成的插件结果保留，未开始的插件不再调度。
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// 置位取消标记（供 cancel 模块在强杀进程树前调用）
+pub(crate) fn mark_cancelled() {
+    CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// 校验并逐个安装选中的预装插件：`dsh plugin --profile web add <spec>`。
+///
+/// 返回每个插件的独立结果；单个插件失败仅记入其自身结果，不阻断其余插件。
+/// 仅环境级失败（shim 缺失、pnpm 补齐失败等）或用户取消时返回 `Err`。
+pub async fn install(
+    app_handle: &AppHandle,
+    ids: &[String],
+) -> Result<Vec<PreinstallResult>, String> {
+    CANCELLED.store(false, Ordering::SeqCst);
     if ids.is_empty() {
         return Err("PREINSTALL_EMPTY: no plugins selected".to_string());
     }
 
     // 单次读取预设并构建查找表，提升算法效率至 O(N)
     let presets = load_presets(app_handle);
-    let preset_map: HashMap<&str, &str> = presets
+    let preset_map: HashMap<&str, &PreinstallPluginInfo> = presets
         .iter()
-        .map(|p| (p.id.as_str(), p.spec.as_str()))
+        .map(|p| (p.id.as_str(), p))
         .collect();
 
-    let mut specs = Vec::with_capacity(ids.len());
+    // 校验选中项：未知 id 作为失败结果返回，但不阻断有效插件的安装。
+    let mut selected: Vec<&PreinstallPluginInfo> = Vec::with_capacity(ids.len());
+    let mut invalid_results = Vec::new();
     for id in ids {
-        let spec = preset_map
-            .get(id.as_str())
-            .ok_or_else(|| format!("PREINSTALL_INVALID_ID: {id}"))?;
-        specs.push(spec.to_string());
+        match preset_map.get(id.as_str()) {
+            Some(p) => selected.push(p),
+            None => {
+                log::warn!("PREINSTALL_INVALID_ID: {id}");
+                invalid_results.push(PreinstallResult {
+                    id: id.clone(),
+                    name: id.clone(),
+                    success: false,
+                    error: Some(format!("PREINSTALL_INVALID_ID: unknown plugin id {id}")),
+                });
+            }
+        }
+    }
+    if selected.is_empty() {
+        if invalid_results.is_empty() {
+            return Err("PREINSTALL_EMPTY: no valid plugins selected".to_string());
+        }
+        return Ok(invalid_results);
     }
 
     // 确保 pnpm/dsh shim 存在
@@ -84,7 +148,7 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
         }
     }
 
-    // 构建环境变量
+    // 构建环境变量（所有插件共用）
     let bin_dir = cli::get_bin_dir(app_handle);
     let mut envs = HashMap::from([
         (
@@ -99,10 +163,7 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
     // 用户 pnpm 过旧/不可探测时强制 pnpm shim 优先捆绑版，避免 8/9 的
     // autoInstallPeers 语义与 workspace-root gate 破坏插件安装（见 ensure_pnpm）
     if prefer_bundled_pnpm {
-        envs.insert(
-            "DSH_PREFER_BUNDLED_PNPM".to_string(),
-            "1".to_string(),
-        );
+        envs.insert("DSH_PREFER_BUNDLED_PNPM".to_string(), "1".to_string());
     }
 
     let mut paths = vec![bin_dir];
@@ -117,30 +178,128 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
         envs.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
     }
 
-    // 拼装命令行参数
-    let mut args = vec![
+    let cwd = config::get_dsh_install_path(app_handle);
+
+    // 公共参数前缀；每个插件追加自己的 spec
+    let base_args = vec![
         dsh_bin.as_os_str().to_os_string(),
         OsString::from("plugin"),
         OsString::from("--profile"),
         OsString::from(PREINSTALL_PROFILE),
         OsString::from("add"),
     ];
-    args.extend(specs.iter().map(|s| OsString::from(s.as_str())));
 
-    let cwd = config::get_dsh_install_path(app_handle);
-    // 日志打印实际传给 dsh 的 spec（此前打印 id 会误导排查：安装用的是 spec）
-    log::info!("Running dsh plugin install for {specs:?}");
+    let mut results: Vec<PreinstallResult> = invalid_results;
+    results.reserve(selected.len());
+    for preset in selected {
+        if CANCELLED.load(Ordering::SeqCst) {
+            break;
+        }
 
-    // `dsh plugin add` 在 profile 目录里驱动 pnpm。pnpm v11 会拦下 git 托管
-    // 插件的 prepare 构建与传递原生依赖（见模块头注），其允许键不可预知，因此
-    // 失败时解析输出里印出的 `allowBuilds` 键写回 profile 的 pnpm-workspace.yaml
-    // 后重试，直至成功或再无键可加。
+        let id = preset.id.as_str();
+        log::info!("Installing preinstall plugin {id} (spec {})", preset.spec);
+        let _ = window.emit(
+            PREINSTALL_LOG_EVENT,
+            PreinstallLogPayload {
+                line: format!("[dsh] 开始安装 {id}…"),
+            },
+        );
+        emit_status(&window, id, "installing", None);
+
+        let mut args = base_args.clone();
+        args.push(OsString::from(preset.spec.as_str()));
+
+        let outcome = install_one(app_handle, &node, &args, &cwd, &envs, &window).await;
+
+        if CANCELLED.load(Ordering::SeqCst) {
+            // 用户取消：剩余插件不再调度，结果统一以取消错误返回
+            log::info!("Preinstall cancelled while installing {id}");
+            break;
+        }
+
+        match outcome {
+            Ok(()) => {
+                emit_status(&window, id, "success", None);
+                log::info!("Preinstall plugin {id} installed successfully");
+                results.push(PreinstallResult {
+                    id: id.to_string(),
+                    name: preset.name.clone(),
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                log::error!("Preinstall plugin {id} failed: {e}");
+                let _ = window.emit(
+                    PREINSTALL_LOG_EVENT,
+                    PreinstallLogPayload {
+                        line: format!("[dsh] 插件 {id} 安装失败"),
+                    },
+                );
+                emit_status(&window, id, "failed", Some(e.as_str()));
+                results.push(PreinstallResult {
+                    id: id.to_string(),
+                    name: preset.name.clone(),
+                    success: false,
+                    error: Some(e),
+                });
+            }
+        }
+    }
+
+    if CANCELLED.load(Ordering::SeqCst) {
+        return Err("PREINSTALL_CANCELLED: install cancelled by user".to_string());
+    }
+
+    // Windows 极简模式专项修复：仅当该项成功安装时执行（幂等）
+    if results
+        .iter()
+        .any(|r| r.id == "dsh-win-terminal-inspector" && r.success)
+    {
+        if let Err(e) = workflow::win_inspector::apply(app_handle) {
+            log::warn!("win inspector apply failed after install: {e}");
+        }
+    }
+
+    let (ok, fail) = results
+        .iter()
+        .fold((0, 0), |(ok, fail), r| if r.success { (ok + 1, fail) } else { (ok, fail + 1) });
+    log::info!("Preinstall finished: {ok} succeeded, {fail} failed");
+    Ok(results)
+}
+
+/// 推送单个插件的行内安装状态事件
+fn emit_status(window: &WebviewWindow, id: &str, status: &str, error: Option<&str>) {
+    let _ = window.emit(
+        PREINSTALL_STATUS_EVENT,
+        PreinstallStatusPayload {
+            id: id.to_string(),
+            status: status.to_string(),
+            error: error.map(|s| s.to_string()),
+        },
+    );
+}
+
+/// 安装单个插件：`dsh plugin add` 在 profile 目录里驱动 pnpm。pnpm v11 会拦下
+/// git 托管插件的 prepare 构建与传递原生依赖（见模块头注），其允许键不可预知，
+/// 因此失败时解析输出里印出的 `allowBuilds` 键写回 profile 的 pnpm-workspace.yaml
+/// 后重试，直至成功、无可加键或用户取消。
+async fn install_one(
+    app_handle: &AppHandle,
+    node: &Path,
+    args: &[OsString],
+    cwd: &Path,
+    envs: &HashMap<String, String>,
+    window: &WebviewWindow,
+) -> Result<(), String> {
     let mut retries = 0usize;
-    let exit_code = loop {
-        let (code, captured) =
-            run_plugin_process(&node, &args, &cwd, &envs, &window).await?;
+    loop {
+        let (code, captured) = run_plugin_process(node, args, cwd, envs, window).await?;
         if code == 0 {
-            break 0;
+            return Ok(());
+        }
+        if CANCELLED.load(Ordering::SeqCst) {
+            return Err("PREINSTALL_CANCELLED: user cancelled".to_string());
         }
 
         let new_keys = parse_allowlist_keys(&captured);
@@ -148,7 +307,7 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
             log::error!(
                 "dsh plugin install failed with exit code {code}; no more allowBuilds entries to add"
             );
-            break code;
+            return Err(format!("dsh plugin exited with code {code}"));
         }
 
         retries += 1;
@@ -160,24 +319,7 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
                 line: "[pnpm] 已放行插件构建（allowBuilds），重试安装…".to_string(),
             },
         );
-    };
-
-    if exit_code != 0 {
-        log::error!("dsh plugin install failed with exit code {exit_code}");
-        return Err(format!(
-            "PREINSTALL_FAILED: dsh plugin exited with code {exit_code}"
-        ));
     }
-
-    // Windows 极简模式专项修复
-    if ids.iter().any(|id| id == "dsh-win-terminal-inspector") {
-        if let Err(e) = workflow::win_inspector::apply(app_handle) {
-            log::warn!("win inspector apply failed after install: {e}");
-        }
-    }
-
-    log::info!("Preinstall plugins installed successfully: {ids:?}");
-    Ok(())
 }
 
 /// 确保插件安装使用的 pnpm 可用，返回是否应强制使用捆绑版

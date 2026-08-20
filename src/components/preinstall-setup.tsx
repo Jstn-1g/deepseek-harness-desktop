@@ -1,5 +1,6 @@
 import type { PreinstallPlugin } from '../store/modules/harness'
-import { CircleInfo, Copy, Xmark } from '@gravity-ui/icons'
+import type { PreinstallPluginStatus } from '../store/modules/harness/types'
+import { CircleCheck, CircleInfo, CircleXmark, Copy, Xmark } from '@gravity-ui/icons'
 import { Button, Card, Checkbox, Chip } from '@heroui/react'
 import { invoke } from '@tauri-apps/api/core'
 import { useEffect, useState } from 'react'
@@ -16,10 +17,21 @@ import { toast } from '../utils/toast'
  */
 
 /** 插件列表的一行：勾选框 + 名称 + 推荐/已安装标签 + 仓库跳转按钮 */
-function PluginRow({ plugin, checked, disabled, onToggle, onOpenRepo }: {
+function PluginStatus({ status }: { status: PreinstallPluginStatus }) {
+  if (status === 'installing') {
+    return <span className="h-4 w-4 animate-load-spin rounded-full border-2 border-load-ring border-t-load-ink" />
+  }
+  if (status === 'success') {
+    return <CircleCheck className="size-4 text-success" />
+  }
+  return <CircleXmark className="size-4 text-danger" />
+}
+
+function PluginRow({ plugin, checked, disabled, status, onToggle, onOpenRepo }: {
   plugin: PreinstallPlugin
   checked: boolean
   disabled: boolean
+  status?: PreinstallPluginStatus
   onToggle: (id: string, checked: boolean) => void
   onOpenRepo: (id: string) => void
 }) {
@@ -59,6 +71,9 @@ function PluginRow({ plugin, checked, disabled, onToggle, onOpenRepo }: {
           </span>
         </Checkbox.Content>
       </Checkbox>
+      <If cond={status !== undefined}>
+        <PluginStatus status={status!} />
+      </If>
       <Button
         isIconOnly
         size="sm"
@@ -169,9 +184,15 @@ export default function PreinstallSetup() {
     void harness.skipPreinstall()
   }
 
+  function handleRetryFailed() {
+    void harness.confirmPreinstall(Object.keys(preinstall.failed))
+  }
+
   // 可选中的插件（未安装项）勾选数，用于禁用"确定"
   const selectableCount = preinstall.plugins.filter(p => !p.installed).length
   const selectedCount = [...effectiveSelected].filter(id => preinstall.plugins.some(p => p.id === id && !p.installed)).length
+  const failedIds = Object.keys(preinstall.failed)
+  const failedPlugins = preinstall.plugins.filter(plugin => failedIds.includes(plugin.id))
   const installing = preinstall.installing
 
   return (
@@ -184,100 +205,86 @@ export default function PreinstallSetup() {
 
         <If
           cond={installing}
+          then={(
+            <div className="flex flex-col gap-2.5">
+              <Card className="p-0 rounded-md">
+                {preinstall.plugins.map(plugin => (
+                  <PluginRow
+                    key={plugin.id}
+                    plugin={plugin}
+                    checked={effectiveSelected.has(plugin.id)}
+                    status={preinstall.status[plugin.id]}
+                    disabled
+                    onToggle={toggle}
+                    onOpenRepo={openRepo}
+                  />
+                ))}
+              </Card>
+              <p className="text-center text-xs leading-[18px] text-load-muted">{t('preinstall.installing')}</p>
+              <LogPanel logs={preinstall.logs} />
+              <div className="flex items-center justify-center">
+                <Button className="rounded-md" size="sm" variant="tertiary" onPress={harness.cancelPreinstall} isDisabled={preinstall.cancelling}>
+                  <Xmark className="size-3.5" />
+                  {preinstall.cancelling ? t('preinstall.cancelling') : t('preinstall.cancel')}
+                </Button>
+              </div>
+            </div>
+          )}
           else={(
-            // 安装失败时不叠加插件列表，只展示错误 + 日志 + 重试/跳过
             <If
               cond={preinstall.error !== ''}
-              else={(
-                <>
-                  {/* 插件列表 */}
-                  <Card className="p-0 rounded-md">
-                    <If
-                      cond={preinstall.plugins.length > 0}
-                      else={(
-                        <p className="text-center text-xs text-load-muted">{t('preinstall.empty')}</p>
-                      )}
-                    >
-                      {preinstall.plugins.map(plugin => (
-                        <PluginRow
-                          key={plugin.id}
-                          plugin={plugin}
-                          checked={effectiveSelected.has(plugin.id)}
-                          disabled={installing}
-                          onToggle={toggle}
-                          onOpenRepo={openRepo}
-                        />
-                      ))}
-                    </If>
-                  </Card>
-
-                  {/* 操作区：跳过 / 确定 */}
-                  <div className="flex items-center justify-end gap-2">
-                    <Button className="rounded-md" size="sm" variant="tertiary" onPress={handleSkip} isDisabled={installing}>
-                      {t('preinstall.skip')}
-                    </Button>
-                    <Button
-                      className="rounded-md"
-                      size="sm"
-                      variant="primary"
-                      onPress={handleConfirm}
-                      isDisabled={installing || selectedCount === 0 || selectableCount === 0}
-                    >
-                      {t('preinstall.confirm')}
-                    </Button>
+              then={(
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex flex-col gap-2 rounded-lg border border-danger/30 bg-danger/5 px-3.5 py-3">
+                    <p className="text-xs font-medium text-danger">{t('preinstall.failed')}</p>
+                    <p className="max-h-[120px] overflow-y-auto break-all font-mono text-[11px] leading-relaxed text-load-muted">{preinstall.error}</p>
                   </div>
-                </>
+                  <LogPanel logs={preinstall.logs} />
+                  <div className="flex items-center justify-end gap-2">
+                    <Button className="rounded-md" size="sm" variant="tertiary" onPress={handleSkip}>{t('preinstall.skip')}</Button>
+                    <Button className="rounded-md" size="sm" variant="primary" onPress={handleConfirm} isDisabled={selectedCount === 0 || selectableCount === 0}>{t('app.retry')}</Button>
+                  </div>
+                </div>
               )}
-            >
-              {/* 安装失败：错误信息 + 日志 + 操作 */}
-              <div className="flex flex-col gap-2.5">
-                <div className="flex flex-col gap-2 rounded-lg border border-danger/30 bg-danger/5 px-3.5 py-3">
-                  <p className="text-xs font-medium text-danger">{t('preinstall.failed')}</p>
-                  <p className="max-h-[120px] overflow-y-auto break-all font-mono text-[11px] leading-relaxed text-load-muted">
-                    {preinstall.error}
-                  </p>
-                </div>
-                <LogPanel logs={preinstall.logs} />
-                <div className="flex items-center justify-end gap-2">
-                  <Button className="rounded-md" size="sm" variant="tertiary" onPress={handleSkip} isDisabled={installing}>
-                    {t('preinstall.skip')}
-                  </Button>
-                  <Button
-                    className="rounded-md"
-                    size="sm"
-                    variant="primary"
-                    onPress={handleConfirm}
-                    isDisabled={installing || selectedCount === 0 || selectableCount === 0}
-                  >
-                    {t('app.retry')}
-                  </Button>
-                </div>
-              </div>
-            </If>
+              else={(
+                <If
+                  cond={failedIds.length > 0}
+                  then={(
+                    <div className="flex flex-col gap-2.5">
+                      <div className="flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3.5 py-3">
+                        <p className="text-xs font-medium text-warning">{t('preinstall.partial_failed', { count: failedIds.length })}</p>
+                        <p className="text-xs leading-5 text-load-muted">{t('preinstall.partial_failed_hint')}</p>
+                        <ul className="m-0 list-disc pl-5 text-xs leading-5 text-load-muted">
+                          {failedPlugins.map(plugin => <li key={plugin.id}>{plugin.name}</li>)}
+                        </ul>
+                      </div>
+                      <LogPanel logs={preinstall.logs} />
+                      <div className="flex items-center justify-end gap-2">
+                        <Button className="rounded-md" size="sm" variant="tertiary" onPress={handleSkip}>{t('preinstall.continue')}</Button>
+                        <Button className="rounded-md" size="sm" variant="primary" onPress={handleRetryFailed}>{t('preinstall.retry_failed')}</Button>
+                      </div>
+                    </div>
+                  )}
+                  else={(
+                    <>
+                      <Card className="p-0 rounded-md">
+                        <If cond={preinstall.plugins.length > 0} else={<p className="text-center text-xs text-load-muted">{t('preinstall.empty')}</p>}>
+                          {preinstall.plugins.map(plugin => (
+                            <PluginRow key={plugin.id} plugin={plugin} checked={effectiveSelected.has(plugin.id)} disabled={false} onToggle={toggle} onOpenRepo={openRepo} />
+                          ))}
+                        </If>
+                      </Card>
+                      <div className="flex items-center justify-end gap-2">
+                        <Button className="rounded-md" size="sm" variant="tertiary" onPress={handleSkip}>{t('preinstall.skip')}</Button>
+                        <Button className="rounded-md" size="sm" variant="primary" onPress={handleConfirm} isDisabled={selectedCount === 0 || selectableCount === 0}>{t('preinstall.confirm')}</Button>
+                      </div>
+                    </>
+                  )}
+                />
+              )}
+            />
           )}
-        >
-          {/* 安装中：与 Loadable 加载页一致的指示样式（spinner 在上、文案在下，图标旁不加文字） */}
-          <div className="flex flex-col gap-2.5">
-            <div className="flex flex-col items-center gap-3">
-              <span className="h-5 w-5 animate-load-spin rounded-full border-2 border-load-ring border-t-load-ink" />
-              <p className="text-xs leading-[18px] text-load-muted">{t('preinstall.installing')}</p>
-            </div>
-            <LogPanel logs={preinstall.logs} />
-            {/* 取消安装：网络抖动/限流（429）时可能长时间卡在重试，给用户退出入口 */}
-            <div className="flex items-center justify-center">
-              <Button
-                className="rounded-md"
-                size="sm"
-                variant="tertiary"
-                onPress={harness.cancelPreinstall}
-                isDisabled={preinstall.cancelling}
-              >
-                <Xmark className="size-3.5" />
-                {preinstall.cancelling ? t('preinstall.cancelling') : t('preinstall.cancel')}
-              </Button>
-            </div>
-          </div>
-        </If>
+        />
       </div>
     </div>
   )

@@ -23,6 +23,25 @@ export interface PreinstallLogPayload {
   line: string
 }
 
+/** 单个预装插件的行内安装状态 */
+export type PreinstallPluginStatus = 'installing' | 'success' | 'failed'
+
+/** Rust 侧 preinstall-plugin-status 事件载荷（按插件 id 推送行内状态） */
+export interface PreinstallStatusPayload {
+  id: string
+  status: PreinstallPluginStatus
+  /** 失败原因（仅 failed 时携带） */
+  error?: string
+}
+
+/** 单个预装插件的安装结果（Rust 侧 PreinstallResult，失败汇总与按项重试用） */
+export interface PreinstallPluginResult {
+  id: string
+  name: string
+  success: boolean
+  error: string | null
+}
+
 /** 安装器展示状态 */
 export interface InstallerState {
   title: string

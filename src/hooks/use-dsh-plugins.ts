@@ -20,6 +20,8 @@ export interface DshPlugin {
   recommended: boolean
   /** 预设清单中的「修复」标记 */
   fix: boolean
+  /** 是否命中已知的「会破坏界面加载」的坏版本（issue #44） */
+  broken: boolean
 }
 
 export interface UseDshPluginsResult {

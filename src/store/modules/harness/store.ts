@@ -5,6 +5,9 @@ import type {
   InstallProgress,
   PreinstallLogPayload,
   PreinstallPlugin,
+  PreinstallPluginResult,
+  PreinstallPluginStatus,
+  PreinstallStatusPayload,
   SetupStatus,
   SidebarBusyAction,
 } from './types'
@@ -155,6 +158,10 @@ export const harness = defineStore({
       cancelling: false,
       logs: [] as string[],
       error: '',
+      /** 每轮安装的行内状态：插件 id → installing/success/failed */
+      status: {} as Record<string, PreinstallPluginStatus>,
+      /** 本轮失败插件：插件 id → 错误信息 */
+      failed: {} as Record<string, string>,
     },
     serviceUrl: 'http://127.0.0.1:3080',
     /** 带时间戳的 iframe 地址（boot 时生成一次，避免缓存） */
@@ -441,25 +448,66 @@ export const harness = defineStore({
       })
     },
 
-    /** 确认安装选中的预装插件：流式日志，完成后继续启动服务 */
+    /** 预装安装状态流：按插件 id 更新行内状态与失败清单 */
+    async listenPreinstallStatus(): Promise<UnlistenFn> {
+      return listen<PreinstallStatusPayload>('preinstall-plugin-status', (e) => {
+        const { id, status, error } = e.payload
+        this.preinstall.status = { ...this.preinstall.status, [id]: status }
+        if (status === 'failed') {
+          this.preinstall.failed = {
+            ...this.preinstall.failed,
+            [id]: error || 'PREINSTALL_FAILED: unknown plugin error',
+          }
+        }
+        else if (status === 'success') {
+          const failed = { ...this.preinstall.failed }
+          delete failed[id]
+          this.preinstall.failed = failed
+        }
+      })
+    },
+
+    /** 确认安装选中的预装插件：逐项流式展示，部分失败时停留在页面供按项重试 */
     async confirmPreinstall(ids: string[]) {
       if (this.preinstall.installing || ids.length === 0)
         return
       this.preinstall.installing = true
       this.preinstall.error = ''
       this.preinstall.logs = []
-      let unlisten: UnlistenFn | null = null
+      this.preinstall.status = {}
+      this.preinstall.failed = {}
+      let unlistenLog: UnlistenFn | null = null
+      let unlistenStatus: UnlistenFn | null = null
       try {
-        unlisten = await this.listenPreinstallLog()
-        await invoke('install_preinstall_plugins', { ids })
-        await this.continueAfterPreinstall()
+        unlistenLog = await this.listenPreinstallLog()
+        unlistenStatus = await this.listenPreinstallStatus()
+        const results = await invoke<PreinstallPluginResult[]>('install_preinstall_plugins', { ids })
+        const failed = results.filter(result => !result.success)
+        if (failed.length > 0) {
+          // 后端已完成环境级收尾；只把失败项留在当前页，不阻断已成功插件。
+          this.preinstall.failed = Object.fromEntries(
+            failed.map(result => [result.id, result.error || 'PREINSTALL_FAILED: unknown plugin error']),
+          )
+        }
+        else {
+          await this.continueAfterPreinstall()
+        }
       }
       catch (err) {
-        console.error('[Harness] preinstall failed:', err)
-        this.preinstall.error = String(err)
+        const message = String(err)
+        // 用户主动取消不应显示为安装失败；环境级错误仍保留原有重试面板。
+        if (this.preinstall.cancelling || message.includes('PREINSTALL_CANCELLED')) {
+          this.preinstall.status = {}
+          this.preinstall.failed = {}
+        }
+        else {
+          console.error('[Harness] preinstall failed:', err)
+          this.preinstall.error = message
+        }
       }
       finally {
-        unlisten?.()
+        unlistenLog?.()
+        unlistenStatus?.()
         this.preinstall.installing = false
         this.preinstall.cancelling = false
       }
@@ -477,10 +525,6 @@ export const harness = defineStore({
       this.preinstall.cancelling = true
       try {
         await invoke('cancel_preinstall_plugins')
-        await listen<unknown>('preinstall-cancelled', () => {
-          this.preinstall.installing = false
-          this.preinstall.cancelling = false
-        })
       }
       catch (err) {
         console.error('[Harness] cancel preinstall failed:', err)
@@ -517,6 +561,8 @@ export const harness = defineStore({
         return
       this.preinstall.error = ''
       this.preinstall.logs = []
+      this.preinstall.status = {}
+      this.preinstall.failed = {}
       this.status = 'preinstall'
       await this.loadPreinstallPlugins()
     },

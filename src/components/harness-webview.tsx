@@ -7,6 +7,7 @@ import { useIframeShim } from '@/hooks/use-iframe-shim'
 import { harness } from '../store/modules/harness'
 import Loadable from './loadable'
 import Navbar from './navbar'
+import PluginRecovery from './plugin-recovery'
 import PreinstallSetup from './preinstall-setup'
 import Setup from './setup'
 
@@ -68,6 +69,9 @@ export default function HarnessWebview() {
   return (
     <main className="relative flex min-h-0 flex-1 flex-col bg-canvas">
       <Navbar iframeRef={iframeRef} />
+
+      {/* 已知坏版本插件（会导致内嵌界面启动崩溃）时展示恢复提示条 */}
+      <PluginRecovery />
 
       {/* iframe 区域：加载失败时用覆盖层展示重试（iframe 保持挂载，重试复用） */}
       <div className="relative min-h-0 flex-1">

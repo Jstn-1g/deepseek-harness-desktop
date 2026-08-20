@@ -23,6 +23,10 @@ pub struct PreinstallCancelPayload {}
 
 /// 取消正在进行的预装插件安装
 pub async fn cancel(app_handle: &AppHandle) {
+    // 先置位全局取消标记：安装循环在下一个插件前退出，不再调度剩余插件；
+    // Windows 下随后强杀当前进程树。
+    super::install::mark_cancelled();
+
     if !cfg!(windows) {
         return;
     }

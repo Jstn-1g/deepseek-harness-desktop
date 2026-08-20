@@ -246,21 +246,24 @@ pub async fn get_preinstall_plugins(
     Ok(plugin::list(&app_handle))
 }
 
-/// 安装选中的预装插件（`dsh plugin --profile web add <ids...>`），
-/// 进程输出实时通过 `preinstall-log` 事件推送；成功后标记引导完成并记录预设指纹。
+/// 逐个安装选中的预装插件（`dsh plugin --profile web add <spec>`），
+/// 进程输出实时通过 `preinstall-log` 事件推送，行内状态通过
+/// `preinstall-plugin-status` 事件推送；返回每个插件的独立结果（单个插件
+/// 失败不阻断其余插件）。无环境级错误（含部分失败）时标记引导完成并记录
+/// 预设指纹；用户取消或环境准备失败时返回 `Err` 不标记。
 #[tauri::command]
 pub async fn install_preinstall_plugins(
     app_handle: AppHandle,
     ids: Vec<String>,
-) -> Result<(), String> {
-    plugin::install(&app_handle, &ids).await?;
+) -> Result<Vec<plugin::PreinstallResult>, String> {
+    let results = plugin::install(&app_handle, &ids).await?;
     let mut setting = config::get_store_dat_setting(&app_handle);
     setting.preinstall_done = true;
     if let Some(hash) = plugin::current_preset_hash(&app_handle) {
         setting.preset_hash = Some(hash);
     }
     config::set_store_dat_setting(&app_handle, setting);
-    Ok(())
+    Ok(results)
 }
 
 /// 取消正在进行的预装插件安装（网络抖动/限流卡住时用户点“取消”）。
@@ -304,6 +307,20 @@ pub async fn open_preinstall_repo(app_handle: AppHandle, id: String) -> Result<(
 #[tauri::command]
 pub fn get_dsh_plugins(app_handle: AppHandle) -> Vec<plugin::DshPlugin> {
     plugin::watch::list(&app_handle)
+}
+
+/// 升级已安装插件到最新版（恢复坏版本崩溃，issue #44）：`dsh plugin --profile web add <id>`。
+/// 成功后调用方触发服务重启以加载新 bundle。
+#[tauri::command]
+pub async fn upgrade_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::upgrade(&app_handle, &id).await
+}
+
+/// 卸载已安装插件（恢复坏版本崩溃，issue #44）：`dsh plugin --profile web remove <id>`。
+/// 成功后调用方触发服务重启以让其余插件正常加载。
+#[tauri::command]
+pub async fn remove_dsh_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
+    plugin::remove(&app_handle, &id).await
 }
 
 

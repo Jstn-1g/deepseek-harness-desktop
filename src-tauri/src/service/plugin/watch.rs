@@ -28,6 +28,37 @@ pub(crate) const PLUGINS_UPDATED_EVENT: &str = "dsh-plugins-updated";
 /// 避免每个 tick 都推送一次中间态
 const DEBOUNCE: Duration = Duration::from_secs(2);
 
+/// 已知会破坏界面加载的插件坏版本表（id → 最后一个损坏版本）。
+///
+/// 命中时前端给出「升级/卸载 + 重启」的可操作提示（issue #44：
+/// `@linxin666/dsh-client-ui-web-ui-settings` 老版本注册 keyed slot
+/// `settings.plugin.item` 未带 `options.key`，在客户端 boot 阶段整页崩溃；
+/// 上游在 >=0.1.18 修复）。此表随上游修复演进，命中即视为建议升级/卸载。
+const KNOWN_BROKEN: &[(&str, (u32, u32, u32))] = &[
+    ("@linxin666/dsh-client-ui-web-ui-settings", (0, 1, 17)),
+];
+
+/// 简易解析 `X.Y.Z` 版本号（忽略 `v/^/~/` 前缀以及 pre-release 后缀）；
+/// 不可解析返回 `None`（此时不判定为坏版本）。
+fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let trimmed = v.trim().trim_start_matches(|c: char| c == 'v' || c == '^' || c == '~');
+    let mut parts = trimmed.split(|c: char| c == '.' || c == '-');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let patch = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// 是否命中已知的坏版本：id 匹配且已安装版本 ≤ 表中最后一个损坏版本。
+fn is_known_broken(id: &str, version: &str) -> bool {
+    let Some(installed) = parse_version(version) else {
+        return false;
+    };
+    KNOWN_BROKEN
+        .iter()
+        .any(|(broken_id, max)| *broken_id == id && installed <= *max)
+}
+
 /// 已安装插件（序列化为 camelCase 给前端）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +78,9 @@ pub struct DshPlugin {
     pub recommended: bool,
     /// 预设清单中的「修复」标记（黄色 chip）
     pub fix: bool,
+    /// 是否命中已知的「会破坏界面加载」的坏版本（issue #44）；
+    /// 前端据此给出「升级/卸载 + 重启」可操作提示
+    pub broken: bool,
 }
 
 /// 用于强类型解析插件自身 package.json 的辅助结构
@@ -143,6 +177,11 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
                 .or_else(|| preset.map(|p| p.repo_url.clone()))
                 .map(|url| normalize_repo_url(&url))
                 .unwrap_or_default();
+            let version = meta
+                .as_ref()
+                .and_then(|m| m.version.clone())
+                .unwrap_or_default();
+            let broken = is_known_broken(id.as_str(), &version);
             Some(DshPlugin {
                 id: id.clone(),
                 name: meta
@@ -150,10 +189,7 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
                     .and_then(|m| m.name.clone())
                     .or_else(|| preset.map(|p| p.name.clone()))
                     .unwrap_or_else(|| id.clone()),
-                version: meta
-                    .as_ref()
-                    .and_then(|m| m.version.clone())
-                    .unwrap_or_default(),
+                version,
                 description: meta
                     .as_ref()
                     .and_then(|m| m.description.clone())
@@ -163,6 +199,7 @@ fn parse_plugins(profile: &Path, presets: &[PreinstallPluginInfo]) -> Vec<DshPlu
                 bundled: bundled.contains(id.as_str()),
                 recommended: preset.map(|p| p.recommended).unwrap_or(false),
                 fix: preset.map(|p| p.fix).unwrap_or(false),
+                broken,
             })
         })
         .collect()
@@ -370,6 +407,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(parse_plugins(&dir, &[]).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_lower_or_equal_max_is_broken() {
+        // issue #44：@linxin666/dsh-client-ui-web-ui-settings ≤ 0.1.17 崩溃，上游 ≥0.1.18 修复
+        assert!(is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.1.17"
+        ));
+        assert!(is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.1.16"
+        ));
+        assert!(is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.0.9"
+        ));
+        assert!(is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.1.17-beta.1"
+        ));
+        // v/^/~/ 前缀应被忽略
+        assert!(is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "v0.1.17"
+        ));
+        // ≥0.1.18 已修复
+        assert!(!is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.1.18"
+        ));
+        assert!(!is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "0.2.5"
+        ));
+    }
+
+    #[test]
+    fn unrelated_plugin_or_bad_version_not_broken() {
+        assert!(!is_known_broken("dshmarket", "0.1.17"));
+        assert!(!is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            ""
+        ));
+        assert!(!is_known_broken(
+            "@linxin666/dsh-client-ui-web-ui-settings",
+            "not-a-version"
+        ));
+    }
+
+    #[test]
+    fn broken_flag_set_on_parsed_plugin() {
+        let dir = build_profile(
+            "broken",
+            &[(
+                "@linxin666/dsh-client-ui-web-ui-settings",
+                r#"{"name":"@linxin666/dsh-client-ui-web-ui-settings","version":"0.1.17","dsh":{"bundle":{}}}"#,
+            )],
+        );
+        let plugins = parse_plugins(&dir, &[]);
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].broken);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
