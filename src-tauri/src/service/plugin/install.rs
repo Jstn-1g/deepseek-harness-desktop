@@ -7,8 +7,12 @@
 //!    其允许键（depPath = `name@<pkgResolutionId>`）随 pnpm 的克隆方式变化
 //!    （git+ssh#sha / codeload tar.gz），无法预先确定；
 //! 2. 传递依赖的原生构建（如 `node-pty`，`ERR_PNPM_IGNORED_BUILDS`）。
-//! 因此在安装失败时从 pnpm 错误输出解析它建议的 `allowBuilds` 键，写入 profile
-//! 的 `pnpm-workspace.yaml` 后重试，直至成功或无可解析项。
+//! 因此从 pnpm 错误输出解析它建议的 `allowBuilds` 键，写入 profile 的
+//! `pnpm-workspace.yaml` 后重试，直至成功或无可解析项。
+//!
+//! 关键陷阱：pnpm v11 在 `allowBuilds` 阻断时可能仍以 **exit 0** 退出（假成功），
+//! 所以重试逻辑不能只看退出码（见 [`run_plugin_with_allow_build_retry`]），安装成功
+//! 后还会核验 `node_modules` 产物是否真实落盘（见 [`verify_installed_products`]）。
 
 use crate::config;
 use crate::service::cli;
@@ -24,7 +28,7 @@ use serde_yaml::{Mapping, Value};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use super::errors;
-use super::installed::{is_installed, profile_dir};
+use super::installed::{installed_name, is_installed, profile_dir};
 use super::preset::{bundled_dep_spec, bundled_plugin_dir, load_presets, PreinstallPluginInfo};
 use super::process::{run_plugin_process, PreinstallLogPayload, PREINSTALL_LOG_EVENT};
 use super::recovery::is_actionable_plugin_ref;
@@ -177,12 +181,10 @@ pub async fn install(app_handle: &AppHandle, ids: &[String]) -> Result<(), Strin
         ));
     }
 
-    // 安装成功：清除这些插件的历史错误记录
-    for id in ids {
-        if let Err(e) = errors::clear(app_handle, id) {
-            log::warn!("failed to clear plugin error for {id}: {e}");
-        }
-    }
+    // 真正修复：核验本次安装是否真实落盘。pnpm 可能在 allowBuilds 阻断时仍以
+    // exit 0 退出（假成功），若产物缺失则记录错误并返回 Err，让前端如实展示失败、
+    // 允许重试，而不是误报「已安装」。已落盘的插件在上一步被核验并清除历史错误。
+    verify_installed_products(app_handle, ids, &preset_map)?;
 
     // Windows 极简模式专项修复
     if ids.iter().any(|id| id == "dsh-win-terminal-inspector") {
@@ -231,6 +233,47 @@ fn preset_spec_for_install(
         )
     })?;
     Ok(bundled_dep_spec(&dir))
+}
+
+/// 校验本次安装是否真正落盘（防「假成功」）：pnpm v11 在 `allowBuilds` 阻断
+/// git 托管插件 / 传递依赖构建时仍可能以 exit 0 退出，仅凭退出码不足以认定安装
+/// 成功。此处逐插件核验 profile 的 `node_modules/<安装名>/package.json` 是否真实
+/// 存在：缺失者记录错误并整体返回 Err，避免前端误报「已安装 N 个插件」。
+///
+/// 已落盘的插件同步清除其历史错误；`ids` 里未匹配到预设的条目忽略（调用处已先
+/// 校验过 ID，正常不可达）。
+fn verify_installed_products(
+    app_handle: &AppHandle,
+    ids: &[String],
+    preset_map: &HashMap<&str, &PreinstallPluginInfo>,
+) -> Result<(), String> {
+    let node_modules = profile_dir(app_handle).join("node_modules");
+    let mut missing: Vec<String> = Vec::new();
+    for id in ids {
+        let Some(preset) = preset_map.get(id.as_str()) else {
+            continue;
+        };
+        let name = installed_name(preset);
+        if node_modules.join(name).join("package.json").is_file() {
+            if let Err(e) = errors::clear(app_handle, id) {
+                log::warn!("failed to clear plugin error for {id}: {e}");
+            }
+        } else {
+            missing.push(id.clone());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let detail = format!(
+        "PREINSTALL_SILENT_FAIL: 以下插件退出码为 0 但未真正安装（node_modules 缺少产物）：{missing:?}"
+    );
+    for id in &missing {
+        if let Err(e) = errors::record(app_handle, id, "install", &detail) {
+            log::warn!("failed to record plugin error for {id}: {e}");
+        }
+    }
+    Err(detail)
 }
 
 /// 构建 `dsh plugin` 子进程的环境变量：隔离 $DSH_HOME、关闭遥测与颜色，
@@ -283,6 +326,11 @@ pub(crate) fn build_plugin_envs(app_handle: &AppHandle, prefer_bundled_pnpm: boo
 /// 无法解析而 `ERR_MODULE_NOT_FOUND` 失败。
 ///
 /// 返回 `(退出码, 最后一次捕获的输出)`。输出仍逐行经 `preinstall-log` 实时推送。
+///
+/// 注意：pnpm v11 在 `allowBuilds` 将 git 托管插件（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`）
+/// 或传递依赖（`ERR_PNPM_IGNORED_BUILDS`）拦截时仍可能以 **exit 0** 退出（假成功），
+/// 因此不能仅凭退出码判断成败——必须先解析输出里的 `allowBuilds` 键，有键就写入
+/// profile 的 `pnpm-workspace.yaml` 并重试。无键可加（或到达重试上限）才以本次退出码为准。
 async fn run_plugin_with_allow_build_retry(
     app_handle: &AppHandle,
     node: &Path,
@@ -293,33 +341,39 @@ async fn run_plugin_with_allow_build_retry(
     action: &str,
 ) -> Result<(i32, String), String> {
     let mut retries = 0usize;
-    let mut last_output = String::new();
-    let exit_code = loop {
+    let (exit_code, last_output) = loop {
         let (code, captured) = run_plugin_process(node, args, cwd, envs, window).await?;
-        if code == 0 {
-            break 0;
-        }
-        last_output = captured;
-
-        let new_keys = parse_allowlist_keys(&last_output);
-        if new_keys.is_empty() || retries >= MAX_ALLOW_LIST_RETRIES {
-            log::error!(
-                "dsh plugin {action} failed with exit code {code}; no more allowBuilds entries to add"
+        let new_keys = parse_allowlist_keys(&captured);
+        // 有可补充的 allowBuilds 键且未达上限 → 写入并重试（无论本次退出码是否为 0，
+        // 见上方注释：pnpm 可能在阻断时仍以 0 退出）。
+        if !new_keys.is_empty() && retries < MAX_ALLOW_LIST_RETRIES {
+            retries += 1;
+            add_allow_build_keys(app_handle, &new_keys)?;
+            log::info!(
+                "pnpm allowBuilds updated with {new_keys:?}, retrying {action} ({retries})"
             );
-            break code;
+            let _ = window.emit(
+                PREINSTALL_LOG_EVENT,
+                PreinstallLogPayload {
+                    line: format!("[pnpm] 已放行插件构建（allowBuilds），重试{action}…"),
+                },
+            );
+            continue;
         }
-
-        retries += 1;
-        add_allow_build_keys(app_handle, &new_keys)?;
-        log::info!(
-            "pnpm allowBuilds updated with {new_keys:?}, retrying {action} ({retries})"
-        );
-        let _ = window.emit(
-            PREINSTALL_LOG_EVENT,
-            PreinstallLogPayload {
-                line: format!("[pnpm] 已放行插件构建（allowBuilds），重试{action}…"),
-            },
-        );
+        // 到达重试上限仍解析到待放行键：pnpm 的 exit 0 在 allowBuilds 场景不可信，
+        // 直接视为失败（即便退出码为 0），交由调用方走失败 / 产物核验分支。
+        if !new_keys.is_empty() {
+            log::error!(
+                "dsh plugin {action}: allowBuilds retry limit reached ({retries}), keys {new_keys:?} unresolved"
+            );
+            break (if code == 0 { 1 } else { code }, captured);
+        }
+        if code != 0 {
+            log::error!(
+                "dsh plugin {action} failed with exit code {code}; no allowBuilds entries to add"
+            );
+        }
+        break (code, captured);
     };
     Ok((exit_code, last_output))
 }
