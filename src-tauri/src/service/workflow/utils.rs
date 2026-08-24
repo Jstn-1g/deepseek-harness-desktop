@@ -24,6 +24,41 @@ pub(super) fn loopback_http_client(timeout: Duration) -> Result<reqwest::Client,
         .build()
 }
 
+/// 客户端插件 bundle 探测地址。
+///
+/// SPA `/` 在 webServer 绑定后立刻 200，此时连接桥与 Loader 图往往还没就绪；
+/// WebView 若在这个窗口加载，会永久停在官方 boot 页 “Loading plugins…”。
+/// 必须等到真实 JS bundle（而非 HTML fallback）可取，才视为可挂载 iframe。
+pub(super) fn health_probe_plugin_urls(port: u16) -> Vec<String> {
+    vec![
+        format!(
+            "http://127.0.0.1:{port}/plugins/@deepseek-ai/dsh-client-ui-layout/client.js"
+        ),
+        format!(
+            "http://127.0.0.1:{port}/plugins/@deepseek-ai/dsh-client-runtime/client.js"
+        ),
+    ]
+}
+
+/// 判断健康检查响应是不是可用的插件 bundle。
+///
+/// 未知 `/plugins/...` 路径会被 SPA fallback 成 `index.html`（仍是 200），
+/// 绝不能当成插件已就绪。
+pub(super) fn looks_like_plugin_bundle(ok_status: bool, body: &str) -> bool {
+    if !ok_status {
+        return false;
+    }
+    let trimmed = body.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("<!doctype") || lower.starts_with("<html") {
+        return false;
+    }
+    true
+}
+
 /// 检查 Harness 是否真正在运行（探测指定端口，随配置端口联动）
 pub async fn is_dsh_running(port: u16) -> bool {
     let client = loopback_http_client(Duration::from_secs(2)).ok(); // 将 Result 转为 Option
@@ -222,6 +257,34 @@ mod tests {
         assert!(!dir.join("dsh-web.log.3").exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn health_probe_plugin_urls_target_client_bundles_not_spa_root() {
+        let urls = health_probe_plugin_urls(3080);
+        assert!(urls.iter().all(|u| u.contains("/plugins/")));
+        assert!(urls
+            .iter()
+            .all(|u| !u.ends_with("3080/") && !u.ends_with("://127.0.0.1:3080")));
+        assert!(
+            urls.iter()
+                .any(|u| u.contains("dsh-client-ui-layout/client.js"))
+        );
+    }
+
+    #[test]
+    fn spa_html_fallback_is_not_a_plugin_bundle() {
+        assert!(!looks_like_plugin_bundle(
+            true,
+            "<!doctype html><html lang=\"en\"><body>HARNESS Loading plugins...</body></html>"
+        ));
+        assert!(!looks_like_plugin_bundle(true, "<html><head></head></html>"));
+        assert!(!looks_like_plugin_bundle(true, "   "));
+        assert!(!looks_like_plugin_bundle(false, "window.__ModuleLoader__={}"));
+        assert!(looks_like_plugin_bundle(
+            true,
+            "window.__ModuleLoader__.load({id:\"@deepseek-ai/dsh-client-ui-layout\"})"
+        ));
     }
 
     /// keep=0 时把当前日志也删掉。

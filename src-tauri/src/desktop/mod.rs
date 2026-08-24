@@ -4,6 +4,7 @@ pub mod nav;
 pub mod notification;
 pub mod paste;
 pub mod payload;
+pub mod plugin_boot;
 pub mod style;
 pub mod window;
 

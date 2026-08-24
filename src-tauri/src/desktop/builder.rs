@@ -375,7 +375,8 @@ pub fn build_main_window(app: &tauri::AppHandle<Wry>) -> tauri::Result<tauri::We
         .initialization_script_for_all_frames(crate::desktop::notification::NOTIFICATION_SHIM_JS)
         .initialization_script_for_all_frames(crate::desktop::nav::NAV_SHIM_JS)
         .initialization_script_for_all_frames(crate::desktop::style::IFRAME_STYLES_JS)
-        .initialization_script_for_all_frames(crate::desktop::paste::PASTE_SHIM_JS);
+        .initialization_script_for_all_frames(crate::desktop::paste::PASTE_SHIM_JS)
+        .initialization_script_for_all_frames(crate::desktop::plugin_boot::PLUGIN_BOOT_RELOAD_JS);
 
     let webview_window = webview_builder.build()?;
 

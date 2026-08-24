@@ -1178,21 +1178,18 @@ pub async fn proxy_health_check(port: u16) -> Result<String, String> {
         .map_err(|e| format!("HARNESS_HEALTH_CLIENT_FAILED: {e}"))?;
     let mut failures = Vec::with_capacity(2);
 
-    for endpoint in [
-        format!("http://127.0.0.1:{port}/"),
-        format!("http://127.0.0.1:{port}/healthz"),
-    ] {
+    for endpoint in utils::health_probe_plugin_urls(port) {
         match client.get(&endpoint).send().await {
             Ok(response) => {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                if status.is_success() {
+                if utils::looks_like_plugin_bundle(status.is_success(), &body) {
                     return Ok(format!(
                         "healthy - {status} - {}",
                         body.chars().take(80).collect::<String>()
                     ));
                 }
-                let failure = format!("{endpoint} returned {status}");
+                let failure = format!("{endpoint} returned {status} (not a plugin bundle)");
                 log::debug!("Health check failed: {failure}");
                 failures.push(failure);
             }
@@ -1203,7 +1200,7 @@ pub async fn proxy_health_check(port: u16) -> Result<String, String> {
         }
     }
     Err(format!(
-        "HARNESS_NOT_READY: Harness service is not ready ({})",
+        "HARNESS_NOT_READY: Harness client plugins are not ready ({})",
         failures.join("; ")
     ))
 }

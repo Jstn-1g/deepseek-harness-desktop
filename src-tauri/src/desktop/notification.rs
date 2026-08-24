@@ -277,6 +277,7 @@ pub fn enable_notification_permissions(
                     crate::desktop::nav::NAV_SHIM_JS,
                     crate::desktop::style::IFRAME_STYLES_JS,
                     crate::desktop::paste::PASTE_SHIM_JS,
+                    crate::desktop::plugin_boot::PLUGIN_BOOT_RELOAD_JS,
                 ] {
                     let script = HSTRING::from(script);
                     let _ = frame_for_injection.ExecuteScript(
