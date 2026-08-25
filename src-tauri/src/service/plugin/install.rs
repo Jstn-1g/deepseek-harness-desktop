@@ -906,6 +906,23 @@ fn extract_only_builds_git_name(line: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// 从 pnpm 11 的 git depPath 允许键（`name@<pkgResolutionId>`）提取纯包名；
+/// 普通包名 / `name@version` 选择器原样返回。
+///
+/// pnpm 10 的 `onlyBuiltDependencies` 只按包名（或包名@版本）匹配，git depPath 里的
+/// resolution id（`git+ssh://…` / `https://…` 等）对它没有意义，必须剥掉，否则该
+/// 放行项在 pnpm 10 下不生效、git 插件的 prepare 构建仍会被构建门禁拦截。
+fn dep_path_to_name(key: &str) -> String {
+    const GIT_RES_ID_MARKERS: &[&str] =
+        &["@git+", "@https://", "@http://", "@git://", "@github.com/"];
+    for marker in GIT_RES_ID_MARKERS {
+        if let Some(pos) = key.find(marker) {
+            return key[..pos].to_string();
+        }
+    }
+    key.to_string()
+}
+
 /// profile 下的 `pnpm-workspace.yaml` 路径（$DSH_HOME/profiles/<当前档案>）。
 ///
 /// 构建放行项必须写进**当前活动档案**的工作区配置：`dsh plugin --profile <档案>`
@@ -1023,14 +1040,19 @@ fn apply_allow_build_keys(content: &str, keys: &[String]) -> Result<String, Stri
     // pnpm 10（旧 store 复用的用户版）只认 `onlyBuiltDependencies`（list 形式，
     // 见其报错提示），因此这里一并写回，保证 pnpm 10 / 11 两版都能读到放行项；
     // `allowBuilds`（map 形式）覆盖 pnpm 11（捆绑版），二者共存互不冲突。
+    //
+    // 注意：pnpm 11 的 git 允许键是 `name@<pkgResolutionId>` 完整 depPath（按
+    // resolution id 匹配，只能写进 allowBuilds）；pnpm 10 只按包名匹配，因此写入
+    // onlyBuiltDependencies 前必须经 [`dep_path_to_name`] 剥成纯包名。
     let only_key = Value::String("onlyBuiltDependencies".to_string());
     let to_add: Vec<Value> = {
         let existing_only = map.get(&only_key).and_then(Value::as_sequence);
         keys.iter()
-            .filter(|k| {
-                existing_only.map_or(true, |seq| !seq.contains(&Value::String((*k).clone())))
+            .map(|k| dep_path_to_name(k))
+            .filter(|name| {
+                existing_only.map_or(true, |seq| !seq.contains(&Value::String(name.clone())))
             })
-            .map(|k| Value::String(k.clone()))
+            .map(Value::String)
             .collect()
     };
     if !to_add.is_empty() {
@@ -1232,7 +1254,7 @@ pub(crate) fn harness_prefer_bundled_pnpm(app_handle: &AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use super::{append_command_output, apply_allow_build_keys, collapse_allow_builds_duplicates, extract_allow_line_key, extract_only_builds_git_name, git_transport_hint, normalize_git_spec, parse_allowlist_keys, parse_store_major_from_modules_yaml, preset_spec_for_install, shell_quote_spec, silent_install_failure_detail, PreinstallPluginInfo};
+    use super::{append_command_output, apply_allow_build_keys, collapse_allow_builds_duplicates, dep_path_to_name, extract_allow_line_key, extract_only_builds_git_name, git_transport_hint, normalize_git_spec, parse_allowlist_keys, parse_store_major_from_modules_yaml, preset_spec_for_install, shell_quote_spec, silent_install_failure_detail, PreinstallPluginInfo};
 
     /// 构造预设条目的测试助手（internal 由各用例显式指定）
     fn preset(id: &str, spec: &str, internal: bool) -> PreinstallPluginInfo {
@@ -1472,6 +1494,28 @@ onlyBuiltDependencies:
     }
 
     #[test]
+    fn dep_path_to_name_strips_git_resolution_keeps_plain_names() {
+        // git depPath（unscoped）：剥掉 resolution id，保留纯包名
+        assert_eq!(
+            dep_path_to_name(
+                "dsh-better-sidebar@git+ssh://git@github.com/omdsh-dev/DSH-better-sidebar.git#6c89"
+            ),
+            "dsh-better-sidebar"
+        );
+        // git depPath（scoped）：同样只剥 resolution id，保留 `@scope/name`
+        assert_eq!(
+            dep_path_to_name(
+                "@deepseek-ai/dsh-base@git+https://github.com/deepseek-ai/dsh-base.git#abc123"
+            ),
+            "@deepseek-ai/dsh-base"
+        );
+        // 普通包名 / 包名@版本选择器：原样返回
+        assert_eq!(dep_path_to_name("node-pty"), "node-pty");
+        assert_eq!(dep_path_to_name("node-pty@1.1.0"), "node-pty@1.1.0");
+        assert_eq!(dep_path_to_name("@scope/pkg"), "@scope/pkg");
+    }
+
+    #[test]
     fn allow_line_key_requires_indent() {
         let key = extract_allow_line_key("  node-pty: true");
         assert_eq!(key.as_deref(), Some("node-pty"));
@@ -1539,6 +1583,33 @@ onlyBuiltDependencies:
         // 基础设置被保留
         assert!(doc.get("packages").is_some());
         assert!(doc.get("nodeLinker").is_some());
+    }
+
+    #[test]
+    fn apply_git_dep_path_writes_name_selector_for_pnpm10() {
+        // 回归（CodeRabbit）：git 托管插件的完整 depPath 只写进 pnpm 11 的 allowBuilds
+        // （按 resolution id 匹配）；pnpm 10 的 onlyBuiltDependencies 只按包名匹配，
+        // 必须剥成纯包名，否则 pnpm 10 读不到放行项、prepare 构建仍会被门禁拦截。
+        // 两个出口同时写好后，pnpm 10 / 11 之间切换都不会再次触发构建门禁。
+        let base = "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n";
+        let dep = "dsh-better-sidebar@git+ssh://git@github.com/omdsh-dev/DSH-better-sidebar.git#6c89"
+            .to_string();
+        let out = apply_allow_build_keys(base, &[dep.clone()]).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        // pnpm 11：allowBuilds 保留完整 depPath
+        assert_eq!(
+            doc["allowBuilds"][&serde_yaml::Value::String(dep)],
+            serde_yaml::Value::Bool(true)
+        );
+        // pnpm 10：onlyBuiltDependencies 只含纯包名
+        let only = doc
+            .get("onlyBuiltDependencies")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("onlyBuiltDependencies must be a sequence");
+        assert_eq!(
+            only,
+            &vec![serde_yaml::Value::String("dsh-better-sidebar".to_string())]
+        );
     }
 
     #[test]
