@@ -214,6 +214,8 @@ fn extract_github_target(spec: &str) -> Option<GitHubTarget> {
     github_target_from_path(path, reference)
 }
 
+/// 仅接受当前更新探测明确支持的 Git transport；host 已单独精确校验，
+/// 未知 scheme 无法进入可信 GitHub 更新源路径。
 fn is_supported_git_scheme(scheme: &str) -> bool {
     matches!(
         scheme.to_ascii_lowercase().as_str(),
@@ -221,6 +223,8 @@ fn is_supported_git_scheme(scheme: &str) -> bool {
     )
 }
 
+/// codeload spec 是镜像写入的已安装快照，但更新目标仍应跟踪仓库 HEAD；同时
+/// 要求完整的 `owner/repo/tar.gz/<target>` 形态，避免畸形路径进入更新探测。
 fn codeload_target_from_path(path: &str) -> Option<GitHubTarget> {
     let mut parts = path.trim_matches('/').split('/');
     let owner = parts.next()?;
@@ -236,6 +240,8 @@ fn codeload_target_from_path(path: &str) -> Option<GitHubTarget> {
     })
 }
 
+/// 只接受精确的 `owner/repo`（可带 `.git`）路径；拒绝 GitHub 网页子路径，
+/// 防止把 `/tree/...`、`/commit/...` 等页面误解释为仓库标识。
 fn github_target_from_path(path: &str, reference: GitReference) -> Option<GitHubTarget> {
     let path = path.split('?').next().unwrap_or(path).trim_matches('/');
     let path = path
@@ -252,6 +258,8 @@ fn github_target_from_path(path: &str, reference: GitReference) -> Option<GitHub
     is_owner_repo(&repo).then_some(GitHubTarget { repo, reference })
 }
 
+/// SCP 风格 Git 前缀大小写不敏感，但剩余 selector 必须保持原字节；因此只比较
+/// ASCII 前缀而不规范化或重新分配整个 spec。
 fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let candidate = value.get(..prefix.len())?;
     candidate
@@ -259,6 +267,8 @@ fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> 
         .then(|| &value[prefix.len()..])
 }
 
+/// `git@github.com:22:owner/repo` 中只有纯数字首段才是端口；保守判断可避免
+/// 将 owner、路径或带冒号的 selector 误删。
 fn strip_optional_ssh_port(value: &str) -> &str {
     let Some((candidate, rest)) = value.split_once(':') else {
         return value;
@@ -333,6 +343,8 @@ fn percent_decode_once(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// percent decode 只接受十六进制字节；非法 nibble 返回 None，使 selector
+/// 解析 fail closed 而不是生成被截断的 ref。
 fn hex_value(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
