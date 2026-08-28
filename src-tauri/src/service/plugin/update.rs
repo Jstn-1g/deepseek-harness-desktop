@@ -96,7 +96,7 @@ fn read_locked_commits(profile: &Path, specs: &HashMap<String, String>) -> HashM
     let re =
         regex::Regex::new(r"codeload\.github\.com/([^/\s]+)/([^/\s]+)/tar\.gz/([0-9a-fA-F]{7,40})")
             .expect("static codeload regex");
-    let mut has_current_importer = false;
+    let mut has_project_dependencies = false;
     for document in serde_yaml::Deserializer::from_str(&text) {
         let Ok(lockfile) = serde_yaml::Value::deserialize(document) else {
             return HashMap::new();
@@ -105,15 +105,15 @@ fn read_locked_commits(profile: &Path, specs: &HashMap<String, String>) -> HashM
         else {
             continue;
         };
-        if std::mem::replace(&mut has_current_importer, true) {
-            return HashMap::new();
-        }
         let Some(dependencies) = current_importer
             .get("dependencies")
             .and_then(serde_yaml::Value::as_mapping)
         else {
             continue;
         };
+        if std::mem::replace(&mut has_project_dependencies, true) {
+            return HashMap::new();
+        }
         for (id, dependency) in dependencies {
             let Some(id) = id.as_str() else {
                 continue;
@@ -488,7 +488,7 @@ importers:\n  .:\n    dependencies:\n      stable-plugin:\n        specifier: gi
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pnpm-lock.yaml");
-        let prefix = "metadata: current\n---\nimporters:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/";
+        let prefix = "importers:\n  .:\n    configDependencies: {}\n    packageManagerDependencies:\n      pnpm:\n        specifier: 12.0.0\n        version: 12.0.0\n---\nimporters:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/";
         let specs = HashMap::from([("plugin".into(), "github:owner/repo".into())]);
 
         std::fs::write(&path, format!("{prefix}1111111\n")).unwrap();
