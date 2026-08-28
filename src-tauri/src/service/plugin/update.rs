@@ -96,14 +96,20 @@ fn read_locked_commits(profile: &Path, specs: &HashMap<String, String>) -> HashM
     let re =
         regex::Regex::new(r"codeload\.github\.com/([^/\s]+)/([^/\s]+)/tar\.gz/([0-9a-fA-F]{7,40})")
             .expect("static codeload regex");
+    let mut has_current_importer = false;
     for document in serde_yaml::Deserializer::from_str(&text) {
         let Ok(lockfile) = serde_yaml::Value::deserialize(document) else {
             return HashMap::new();
         };
-        let Some(dependencies) = lockfile
-            .get("importers")
-            .and_then(|value| value.get("."))
-            .and_then(|value| value.get("dependencies"))
+        let Some(current_importer) = lockfile.get("importers").and_then(|value| value.get("."))
+        else {
+            continue;
+        };
+        if std::mem::replace(&mut has_current_importer, true) {
+            return HashMap::new();
+        }
+        let Some(dependencies) = current_importer
+            .get("dependencies")
             .and_then(serde_yaml::Value::as_mapping)
         else {
             continue;
@@ -505,6 +511,38 @@ importers:\n  .:\n    dependencies:\n      stable-plugin:\n        specifier: gi
 importers:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/1111111\n---\nmalformed: [\n";
         let dir =
             std::env::temp_dir().join(format!("dsh-updates-lock-malformed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), lock).unwrap();
+        let specs = HashMap::from([("plugin".into(), "github:owner/repo".into())]);
+
+        assert!(read_locked_commits(&dir, &specs).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn duplicate_current_importer_documents_fail_closed() {
+        let lock = "\
+importers:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/1111111\n---\nimporters:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/2222222\n";
+        let dir =
+            std::env::temp_dir().join(format!("dsh-updates-lock-ambiguous-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), lock).unwrap();
+        let specs = HashMap::from([("plugin".into(), "github:owner/repo".into())]);
+
+        assert!(read_locked_commits(&dir, &specs).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn duplicate_current_importer_with_repo_mismatch_fails_closed() {
+        let lock = "\
+importers:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:owner/repo\n        version: https://codeload.github.com/owner/repo/tar.gz/1111111\n---\nimporters:\n  .:\n    dependencies:\n      plugin:\n        specifier: github:other/repo\n        version: https://codeload.github.com/other/repo/tar.gz/2222222\n";
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-updates-lock-ambiguous-mismatch-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("pnpm-lock.yaml"), lock).unwrap();
