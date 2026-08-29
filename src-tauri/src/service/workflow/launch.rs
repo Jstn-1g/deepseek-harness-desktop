@@ -437,6 +437,7 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 // PID 与句柄作为整体一次登记，与退出清理（take 一并取出）配对
                 let handle_value = handle as usize;
                 set_owned_process_with_handle(pid, handle_value);
+                let exit_app_handle = app_handle.clone();
                 std::thread::spawn(move || unsafe {
                     use windows_sys::Win32::Foundation::CloseHandle;
                     use windows_sys::Win32::System::Threading::{
@@ -444,21 +445,18 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                     };
                     let process_handle = handle_value as windows_sys::Win32::Foundation::HANDLE;
                     WaitForSingleObject(process_handle, INFINITE);
-                    // 记录退出码：启动即崩溃（插件冲突等）时前端据此快速失败，
-                    // 退出码也便于诊断问题
-                    let mut exit_code: u32 = 0;
-                    if GetExitCodeProcess(process_handle, &mut exit_code) != 0 {
-                        log::warn!("Owned Harness process {pid} exited with code {exit_code}");
-                    } else {
-                        log::warn!("Owned Harness process {pid} exited (exit code unavailable)");
-                    }
                     // 进程确已退出：清空持有 PID 并把 Status 从 Running 回落为
                     // Stopped（原有实现只清 PID、状态永远停留在 Running）。
                     // 仅当该 PID 仍是当前登记才取出——旧监视线程不会误清新进程。
                     // take 返回值里的句柄由本线程负责关闭（不会与
                     // terminate_owned_process 重复 close——进程已 exit，
                     // 通常是本线程取走）。
-                    let owned = on_owned_process_exit(pid);
+                    let owned = on_owned_process_exit(&exit_app_handle, pid, |owned| {
+                        let handle = owned.handle as windows_sys::Win32::Foundation::HANDLE;
+                        let mut exit_code: u32 = 0;
+                        (GetExitCodeProcess(handle, &mut exit_code) != 0)
+                            .then_some(i64::from(exit_code))
+                    });
                     if let Some(owned) = owned {
                         let h = owned.handle as windows_sys::Win32::Foundation::HANDLE;
                         CloseHandle(h);
@@ -495,18 +493,13 @@ pub async fn launch(app_handle: tauri::AppHandle) -> Result<(), String> {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
                 set_owned_process(pid);
+                let exit_app_handle = app_handle.clone();
                 std::thread::spawn(move || {
                     let code = child.wait().ok().and_then(|status| status.code());
-                    // 记录退出码：启动即崩溃（插件冲突等）时前端据此快速失败
-                    if let Some(code) = code {
-                        log::warn!("Owned Harness process {pid} exited with code {code}");
-                    } else {
-                        log::warn!("Owned Harness process {pid} exited (no exit code)");
-                    }
                     // 进程确已退出：清空持有 PID 并把 Status 从 Running 回落为 Stopped
                     // （Unix 无进程句柄可关闭，忽略返回的进程记录）。
                     // 仅当该 PID 仍是当前登记才取出——旧监视线程不会误清新进程。
-                    let _ = on_owned_process_exit(pid);
+                    let _ = on_owned_process_exit(&exit_app_handle, pid, |_| code.map(i64::from));
                 });
                 (stdout, stderr, pid)
             })

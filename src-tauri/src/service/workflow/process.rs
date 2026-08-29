@@ -9,9 +9,21 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use tauri::{AppHandle, Emitter};
 
 use super::status;
 use super::sweep::harness_pid_path;
+
+/// 当前持有的 Harness 根进程意外退出时通知前端的专用事件。
+pub(super) const HARNESS_PROCESS_EXITED_EVENT: &str = "harness-process-exited";
+
+/// Harness 根进程退出事件载荷。退出码在 Unix 被信号终止或系统查询失败时为空。
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct HarnessProcessExitedPayload {
+    pub(super) pid: u32,
+    pub(super) exit_code: Option<i64>,
+}
 
 /// 启动守卫：并发调用 `launch` 时只允许一个真正拉起 dsh 进程
 pub(crate) static LAUNCH_GUARD: AtomicBool = AtomicBool::new(false);
@@ -109,22 +121,42 @@ pub fn has_owned_process() -> bool {
 /// - 仅当退出的 PID 仍是当前登记的那个进程时才清空持有（`take_owned_process_if`
 ///   按 pid 匹配），PID/句柄作为整体成对取出——杜绝「读 PID」与「清句柄」
 ///   之间的跨原子竞态（WARN-6），也杜绝旧监视线程误清新启动进程的登记；
-/// - 若当前状态仍是 Running，回落到 Stopped——否则进程已经没了、状态却永远
-///   显示「运行中」，前端按钮/横幅会长期处于错误语义（WARN-5）。
+/// - 匹配成功后无条件回落到 Stopped——进程可能在 Starting 或 Running 阶段
+///   退出，任何情况下都不能继续广播一个已经失效的运行状态（WARN-5）。
 ///
 /// 返回被取出的进程记录（含 Windows 句柄），取到者负责 `CloseHandle`——保证
 /// 「取走进程」与「关闭句柄」同属一个调用者，杜绝重复 close。幂等：多次调用
 /// （tick 与监视线程并发）只会生效一次，后续调用返回 None。
-pub(super) fn on_owned_process_exit(pid: u32) -> Option<OwnedProcess> {
+pub(super) fn on_owned_process_exit(
+    app_handle: &AppHandle,
+    pid: u32,
+    exit_code: impl FnOnce(&OwnedProcess) -> Option<i64>,
+) -> Option<OwnedProcess> {
     let owned = take_owned_process_if(pid)?;
+    // 必须在成功取走当前 PID 后才读取 Windows 句柄：正常停止会先取走并关闭
+    // 句柄，旧监视线程不得再查询该句柄，更不得发送“意外退出”事件。
+    let exit_code = exit_code(&owned);
 
-    log::warn!(
-        "Owned Harness process {} exited; resetting status to Stopped",
-        owned.pid
-    );
+    if let Some(code) = exit_code {
+        log::warn!(
+            "Owned Harness process {} exited with code {code}; resetting status to Stopped",
+            owned.pid
+        );
+    } else {
+        log::warn!(
+            "Owned Harness process {} exited (exit code unavailable); resetting status to Stopped",
+            owned.pid
+        );
+    }
 
-    if status::get_status() == status::Status::Running {
-        status::set_status(status::Status::Stopped);
+    status::set_status(status::Status::Stopped);
+    status::emit_status(app_handle);
+    let payload = HarnessProcessExitedPayload {
+        pid: owned.pid,
+        exit_code,
+    };
+    if let Err(error) = app_handle.emit(HARNESS_PROCESS_EXITED_EVENT, payload) {
+        log::warn!("Failed to emit Harness process exit event: {error}");
     }
     Some(owned)
 }
@@ -436,6 +468,27 @@ mod tests {
         // 幂等：已清空后再次取出返回 None
         let mut slot: Option<OwnedProcess> = None;
         assert!(take_owned_process_if_matching(&mut slot, 42).is_none());
+    }
+
+    /// 退出载荷保留退出码（含 0），无法取得时显式序列化为 null。
+    #[test]
+    fn harness_process_exit_payload_serializes_exit_code() {
+        let with_code = serde_json::to_value(HarnessProcessExitedPayload {
+            pid: 42,
+            exit_code: Some(0),
+        })
+        .expect("serialize process exit payload");
+        assert_eq!(with_code, serde_json::json!({ "pid": 42, "exitCode": 0 }));
+
+        let without_code = serde_json::to_value(HarnessProcessExitedPayload {
+            pid: 43,
+            exit_code: None,
+        })
+        .expect("serialize process exit payload");
+        assert_eq!(
+            without_code,
+            serde_json::json!({ "pid": 43, "exitCode": null })
+        );
     }
 
     /// `ps -axo pid=,command=` 行解析：首列 PID，其余为命令行。

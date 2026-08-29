@@ -80,6 +80,8 @@
   "errors.startup_inactivity": "Harness made no progress during {{phase}} before its activity deadline. Last readiness status: {{reason}}",
   "errors.startup_absolute": "Harness exceeded the maximum allowed time for {{phase}}. Last readiness status: {{reason}}",
   "errors.startup_exited": "Harness exited during {{phase}}. Last readiness status: {{reason}}",
+  "errors.process_exited_with_code": "Harness stopped unexpectedly (exit code {{code}}). Restart to continue.",
+  "errors.process_exited_without_code": "Harness stopped unexpectedly. Restart to continue.",
   "errors.no_readiness_reason": "No readiness reason was reported.",
   "errors.client_boot_stalled": "The client remained on Loading plugins after all bounded reload attempts.",
   "errors.plugin_route_conflict": "Detected a plugin route conflict: two plugins registered the same route twice. Uninstall the recently added plugin (e.g. dsh-web-ui-all / dsh-better-sidebar) from the Plugins panel, or run dsh plugin --profile <profile> remove <package> for the active profile and retry.",
