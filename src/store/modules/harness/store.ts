@@ -325,9 +325,12 @@ export const harness = defineStore({
       const message = i18next.t(runtimeExitMessageKey(payload.exitCode), {
         code: payload.exitCode,
       })
+      let exitDetail = '(exit code unavailable)'
+      if (payload.exitCode != null)
+        exitDetail = `(exit code ${payload.exitCode})`
       console.warn(
         `[Harness] owned process ${payload.pid} exited unexpectedly`,
-        payload.exitCode == null ? '(exit code unavailable)' : `(exit code ${payload.exitCode})`,
+        exitDetail,
       )
       iframeReloadGate.reset()
       if (iframeRefreshTimer !== undefined) {

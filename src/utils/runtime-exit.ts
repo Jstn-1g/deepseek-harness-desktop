@@ -20,16 +20,20 @@ export function shouldAcceptRuntimeExit({
   currentToken,
   notOwned,
 }: RuntimeExitAcceptance): boolean {
-  return (serviceHealthy || readinessCommitPending)
-    && serviceRunning
-    && busyAction !== 'shutdown'
-    && observedToken === currentToken
-    && notOwned
+  if (!serviceHealthy && !readinessCommitPending)
+    return false
+  if (!serviceRunning)
+    return false
+  if (busyAction === 'shutdown')
+    return false
+  if (observedToken !== currentToken)
+    return false
+  return notOwned
 }
 
 /** 退出码 0 仍是已知退出码；只有 null/undefined 才使用“未知退出码”文案。 */
 export function runtimeExitMessageKey(exitCode: number | null | undefined): string {
-  return exitCode == null
-    ? 'errors.process_exited_without_code'
-    : 'errors.process_exited_with_code'
+  if (exitCode == null)
+    return 'errors.process_exited_without_code'
+  return 'errors.process_exited_with_code'
 }
