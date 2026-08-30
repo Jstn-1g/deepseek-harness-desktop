@@ -100,9 +100,9 @@
 
 ## [P2] 验证本机 Node 版本过期时回退内置 Node
 [测试类型] 兼容性
-[前置条件] 本机 PATH 中存在 node v22.14.0（低于 v22.15.0 下限）；捆绑 `runtime\node.exe` 已是 v22.22.0；网络可达
-[测试步骤] 1. 在本机安装 Node v22.14.0 并加入 PATH，确认 `node --version` 输出 v22.14.0。2. 确保 `%APPDATA%\io.github.hairyf.deepseek-harness-desktop\runtime\node.exe` 位于 v22.22.0。3. 启动安装，观察 Node 任务是否走捆绑运行时（is_runtime_compatible 判定）与安装结果
-[预期结果] 1. 本机 v22.14.0 不满足 v22.15.0 门槛，get_local_node_path 返回 None，不使用本机 node。2. 捆绑 `runtime\node.exe`（v22.22.0）被复用，Node 任务 check_installed 通过兼容判定、不重新下载。3. get_active_node_version 返回 22.22.0，安装成功并进入 Running
+[前置条件] 本机 PATH 中存在 node v22.18.0（低于 v22.19.0 下限）；捆绑 `runtime\node.exe` 已是 v22.22.0；网络可达
+[测试步骤] 1. 在本机安装 Node v22.18.0 并加入 PATH，确认 `node --version` 输出 v22.18.0。2. 确保 `%APPDATA%\io.github.hairyf.deepseek-harness-desktop\runtime\node.exe` 位于 v22.22.0。3. 启动安装，观察 Node 任务是否走捆绑运行时（is_runtime_compatible 判定）与安装结果
+[预期结果] 1. 本机 v22.18.0 不满足 v22.19.0 门槛，get_local_node_path 返回 None，不使用本机 node；Node 23 同样不受支持。2. 捆绑 `runtime\node.exe`（v22.22.0）被复用，Node 任务 check_installed 通过兼容判定、不重新下载。3. get_active_node_version 返回 22.22.0，安装成功并进入 Running
 
 ## [P2] 验证本机已有 pnpm 时优先用用户 pnpm
 [测试类型] 兼容性
@@ -1019,8 +1019,8 @@
 ## [P2] 验证shim优先使用本机兼容Node并在不兼容时回退内置Node
 [测试类型] 功能
 [前置条件] release 构建；本机 PATH 前置 Node v22.22.0；内置 Node 已随应用安装至运行时目录；`cli_link_enabled` 为 true
-[测试步骤] 1. 在 PATH 前置本机 Node 目录后新开终端执行 `dsh --version`。2. 将本机 Node 切换为不兼容版本 v21.7.0（PATH 中仅有 v21.7.0）后新开终端执行 `dsh --version`。
-[预期结果] 1. shim 解析到本机 `node`（v22.22.0 满足 v22.15+ 条件），`dsh --version` 输出版本号、退出码为 0。2. 本机 Node v21.7.0 不满足兼容条件，shim 回退使用内置 `%APP_DIR%\runtime\node.exe`，`dsh --version` 仍输出版本号、退出码为 0。
+[测试步骤] 1. 在 PATH 前置本机 Node v22.22.0 目录后新开终端执行 `dsh --version`。2. 将 PATH 中的本机 Node 切换为 v22.18.0 后新开终端执行 `dsh --version`。3. 再切换为 v23.11.1 后重复执行。
+[预期结果] 1. shim 解析到本机 `node`（v22.22.0 满足 v22.19+ 条件），`dsh --version` 输出版本号、退出码为 0。2. 本机 Node v22.18.0 和 v23.11.1 均不满足兼容条件，两次都回退使用内置 `%APP_DIR%\runtime\node.exe`，`dsh --version` 仍输出版本号、退出码为 0。
 
 ## [P2] 验证用户已安装pnpm时pnpm shim优先转发用户pnpm
 [测试类型] 功能
@@ -1280,5 +1280,3 @@
 [前置条件] 分别具备 Windows 与 macOS/Linux 环境；Windows 已安装插件与 Git Bash；$DSH_HOME 为 ~/.dsh
 [测试步骤] 1. 在 macOS/Linux 环境调用 win_inspector::apply（非 Windows 分支）。2. 在 Windows 环境连续两次调用 win_inspector::apply。3. 检查 cordis.patch.yml 与 minimal-win preset 目录
 [预期结果] 1. 非 Windows 平台 apply 返回 Ok 且无任何副作用，不创建 cordis.patch.yml 挂载行、不生成 ~/.dsh/.agent-presets/minimal-win/。2. 第二次调用不重复追加，cordis.patch.yml 中 dsh-win-terminal-inspector 挂载块仍仅出现一次、内容不变。3. ~/.dsh/.agent-presets/minimal-win/agent.cordis.yml 与 preset.yml 保持首次生成内容，未被覆盖或重写
-
-

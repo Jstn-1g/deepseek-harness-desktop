@@ -43,8 +43,8 @@ pub fn t(key: &str) -> String {
             "Node.js runtime not found, run setup first",
         ),
         "runtime.incompatible" => (
-            "Node.js 运行时版本过低，需要 v22.15.0+ 或 v23.8.0+",
-            "Node.js runtime is too old, need v22.15.0+ or v23.8.0+",
+            "Node.js 运行时不兼容，需要 Node 22.19+（仅 22.x）或 Node 24+",
+            "Node.js runtime is incompatible; need Node 22.19+ (22.x only) or Node 24+",
         ),
         "harness.title" => ("DeepSeek Harness 核心", "DeepSeek Harness core"),
         "harness.core_not_found" => (

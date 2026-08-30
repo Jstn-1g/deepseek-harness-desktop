@@ -12,9 +12,9 @@
 
 ## [P2] 验证本机 Node 版本过期时回退内置 Node
 [测试类型] 兼容性
-[前置条件] 本机 PATH 中存在 node v22.14.0（低于 v22.15.0 下限）；捆绑 `runtime\node.exe` 已是 v22.22.0；网络可达
-[测试步骤] 1. 在本机安装 Node v22.14.0 并加入 PATH，确认 `node --version` 输出 v22.14.0。2. 确保 `%APPDATA%\io.github.hairyf.deepseek-harness-desktop\runtime\node.exe` 位于 v22.22.0。3. 启动安装，观察 Node 任务是否走捆绑运行时（is_runtime_compatible 判定）与安装结果
-[预期结果] 1. 本机 v22.14.0 不满足 v22.15.0 门槛，get_local_node_path 返回 None，不使用本机 node。2. 捆绑 `runtime\node.exe`（v22.22.0）被复用，Node 任务 check_installed 通过兼容判定、不重新下载。3. get_active_node_version 返回 22.22.0，安装成功并进入 Running
+[前置条件] 本机 PATH 中存在 node v22.18.0（低于 v22.19.0 下限）；捆绑 `runtime\node.exe` 已是 v22.22.0；网络可达
+[测试步骤] 1. 在本机安装 Node v22.18.0 并加入 PATH，确认 `node --version` 输出 v22.18.0。2. 确保 `%APPDATA%\io.github.hairyf.deepseek-harness-desktop\runtime\node.exe` 位于 v22.22.0。3. 启动安装，观察 Node 任务是否走捆绑运行时（is_runtime_compatible 判定）与安装结果
+[预期结果] 1. 本机 v22.18.0 不满足 v22.19.0 门槛，get_local_node_path 返回 None，不使用本机 node；Node 23 同样不受支持。2. 捆绑 `runtime\node.exe`（v22.22.0）被复用，Node 任务 check_installed 通过兼容判定、不重新下载。3. get_active_node_version 返回 22.22.0，安装成功并进入 Running
 
 ## [P2] 验证本机已有 pnpm 时优先用用户 pnpm
 [测试类型] 兼容性

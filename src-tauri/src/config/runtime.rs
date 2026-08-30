@@ -468,14 +468,13 @@ fn parse_node_version(output: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-/// 兼容性规则：v22.15.0+ 或 v23.8.0+（v24+ 也满足）
+/// 兼容性规则与当前 DSH `engines.node` 一致：v22.19.0+ 或 v24+；v23 不受支持。
 fn is_supported_node_version(version: &str) -> bool {
     let Some((major, minor, _patch)) = parse_node_version(version) else {
         return false;
     };
     match major {
-        22 => minor >= 15,
-        23 => minor >= 8,
+        22 => minor >= 19,
         major if major >= 24 => true,
         _ => false,
     }
@@ -596,6 +595,17 @@ mod tests {
     fn node_base_url_switches_on_region() {
         assert_eq!(node_base_url(Region::Overseas), NODE_BASE_URL);
         assert_eq!(node_base_url(Region::Domestic), NODE_MIRROR_BASE_URL);
+    }
+
+    /// 当前 DSH 明确支持 22.19+ 与 24+，不支持 22.18 及整个 Node 23 系列。
+    #[test]
+    fn node_runtime_boundary_matches_current_dsh_engine() {
+        assert!(!is_supported_node_version("v22.18.0"));
+        assert!(is_supported_node_version("v22.19.0"));
+        assert!(!is_supported_node_version("v22.19.0-rc.1"));
+        assert!(!is_supported_node_version("v23.99.0"));
+        assert!(is_supported_node_version("v24.0.0"));
+        assert!(!is_supported_node_version("v24.0.0-nightly.1"));
     }
 
     #[test]

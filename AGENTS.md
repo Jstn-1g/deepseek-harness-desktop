@@ -223,7 +223,7 @@ export function FooComponent(props: FooProps) {
    - Broadcast `WM_SETTINGCHANGE` after writing PATH; tell users to reopen terminals.
 5. **CLI shim (`service/cli`)**:
    - Scripts at Win `%LOCALAPPDATA%\deepseek-harness\bin`, Unix `~/.local/bin`.
-   - Prefer local Node (v22.15+ / v23.8+ / v24+), fallback to bundled Node; mind escaping (`%`→`%%`, `'`→`'\''`).
+   - Prefer local Node (v22.19+ / v24+; v23 unsupported), fallback to bundled Node; mind escaping (`%`→`%%`, `'`→`'\''`).
    - Shim text must be English-only (cmd/ps1 parse by code page, Chinese breaks).
    - pnpm shim: forward user-installed pnpm first, else bundled node `dependencies/pnpm/bin/pnpm.cjs`.
    - Install skips when bundled installed **or** user pnpm on PATH (`Pnpm::check_installed`).

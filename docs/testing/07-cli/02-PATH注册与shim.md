@@ -13,8 +13,8 @@
 ## [P2] 验证shim优先使用本机兼容Node并在不兼容时回退内置Node
 [测试类型] 功能
 [前置条件] release 构建；本机 PATH 前置 Node v22.22.0；内置 Node 已随应用安装至运行时目录；`cli_link_enabled` 为 true
-[测试步骤] 1. 在 PATH 前置本机 Node 目录后新开终端执行 `dsh --version`。2. 将本机 Node 切换为不兼容版本 v21.7.0（PATH 中仅有 v21.7.0）后新开终端执行 `dsh --version`。
-[预期结果] 1. shim 解析到本机 `node`（v22.22.0 满足 v22.15+ 条件），`dsh --version` 输出版本号、退出码为 0。2. 本机 Node v21.7.0 不满足兼容条件，shim 回退使用内置 `%APP_DIR%\runtime\node.exe`，`dsh --version` 仍输出版本号、退出码为 0。
+[测试步骤] 1. 在 PATH 前置本机 Node v22.22.0 目录后新开终端执行 `dsh --version`。2. 将 PATH 中的本机 Node 切换为 v22.18.0 后新开终端执行 `dsh --version`。3. 再切换为 v23.11.1 后重复执行。
+[预期结果] 1. shim 解析到本机 `node`（v22.22.0 满足 v22.19+ 条件），`dsh --version` 输出版本号、退出码为 0。2. 本机 Node v22.18.0 和 v23.11.1 均不满足兼容条件，两次都回退使用内置 `%APP_DIR%\runtime\node.exe`，`dsh --version` 仍输出版本号、退出码为 0。
 
 ## [P2] 验证用户已安装pnpm时pnpm shim优先转发用户pnpm
 [测试类型] 功能

@@ -740,6 +740,78 @@ mod tests {
         }
     }
 
+    /// 三种 shim 的版本门槛必须与应用预检及当前 DSH engines 保持一致。
+    #[test]
+    fn generated_shims_match_current_dsh_node_engine() {
+        let cmd = build_cmd_shim(&sample_app_dir(), &sample_dsh_home());
+        let ps1 = build_ps1_shim(&sample_app_dir(), &sample_dsh_home());
+
+        assert!(cmd.contains(r#"findstr /r /x "v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*""#));
+        assert!(cmd.contains("EQU 22 if defined NODE_MINOR if %NODE_MINOR% GEQ 19"));
+        assert!(!cmd.contains("NODE_MAJOR% EQU 23"));
+        assert!(ps1.contains(r#"-match '^v(\d+)\.(\d+)\.(\d+)$'"#));
+        assert!(ps1.contains("$major -eq 22 -and $minor -ge 19"));
+        assert!(!ps1.contains("$major -eq 23"));
+        assert!(SH_NODE_RESOLVE.contains(r#"awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/"#));
+        assert!(SH_NODE_RESOLVE.contains("$MAJOR\" -eq 22 ] && [ \"$MINOR\" -ge 19"));
+        assert!(!SH_NODE_RESOLVE.contains("$MAJOR\" -eq 23"));
+    }
+
+    /// cmd shim 不得把 Node 预发布版本误判为满足稳定版 engines 范围。
+    #[cfg(windows)]
+    #[test]
+    fn cmd_shim_rejects_prerelease_node_and_accepts_stable_boundaries() {
+        let dir = temp_dir("node-version-boundary");
+        let app_dir = dir.join("app");
+        let pnpm_bin = app_dir.join("dependencies/pnpm/bin/pnpm.cjs");
+        std::fs::create_dir_all(pnpm_bin.parent().unwrap()).unwrap();
+        std::fs::write(&pnpm_bin, "fixture").unwrap();
+        let shim = dir.join("pnpm.cmd");
+        std::fs::write(&shim, build_pnpm_cmd_shim(&app_dir)).unwrap();
+        let node_dir = dir.join("local-node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let node = node_dir.join("node.cmd");
+        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let system32 = PathBuf::from(&system_root).join("System32");
+        let path = std::env::join_paths([&node_dir, &system32]).unwrap();
+
+        for (version, accepted) in [
+            ("v22.19.0", true),
+            ("v22.19.0-rc.1", false),
+            ("v23.11.1", false),
+            ("v24.0.0", true),
+            ("v24.0.0-nightly.1", false),
+        ] {
+            std::fs::write(
+                &node,
+                format!(
+                    "@echo off\r\nif \"%~1\"==\"--version\" (\r\n  echo {version}\r\n  exit /b 0\r\n)\r\necho LOCAL_NODE_LAUNCHED\r\nexit /b 0\r\n"
+                ),
+            )
+            .unwrap();
+            let output = std::process::Command::new(system32.join("cmd.exe"))
+                .args(["/d", "/c"])
+                .arg(&shim)
+                .arg("--version")
+                .env("PATH", &path)
+                .env("SystemRoot", &system_root)
+                .env_remove("DSH_NODE")
+                .env("DSH_PREFER_BUNDLED_PNPM", "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                output.status.success(),
+                accepted,
+                "version {version}, stdout: {stdout:?}, stderr: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(stdout.contains("LOCAL_NODE_LAUNCHED"), accepted);
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(windows)]
     #[test]
     fn ps1_shim_escapes_quotes() {

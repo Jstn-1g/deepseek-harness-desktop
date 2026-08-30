@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-/// 捆绑的 Node.js 运行时版本（满足 v22.15.0+ / v23.8.0+ 的要求）
+/// 捆绑的 Node.js 运行时版本（满足当前 DSH 的 v22.19.0+ 或 v24+ 要求）
 pub const NODE_VERSION: &str = "v22.22.0";
 
 /// Node.js 官方下载地址

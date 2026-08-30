@@ -8,8 +8,8 @@
 // shim 共享片段：node 解析逻辑（dsh / pnpm shim 共用）
 //
 // 规则：优先 `DSH_NODE` 环境变量（桌面端注入其已解析并核验过的 node 路径，
-// 保证 shim 与应用预检一致），其次 PATH 中版本兼容的本地 node（v22.15+ /
-// v23.8+ / v24+，与 config::is_supported_node_version 一致），否则回退捆绑
+// 保证 shim 与应用预检一致），其次 PATH 中版本兼容的本地 node（v22.19+ /
+// v24+，与 config::is_supported_node_version 一致），否则回退捆绑
 // 运行时。`DSH_NODE` 只在桌面端自身派生的子进程里存在，终端用户环境不受影响。
 // ---------------------------------------------------------------------------
 
@@ -31,11 +31,13 @@ if exist "%NODE%" goto :launch
 :skip_dsh_node
 where node >nul 2>nul
 if errorlevel 1 goto :use_bundled
-for /f "tokens=1,2 delims=v." %%a in ('node --version 2^>nul ^| findstr /b "v"') do set "NODE_MAJOR=%%a" & set "NODE_MINOR=%%b"
+set "NODE_VERSION="
+for /f "delims=" %%v in ('node --version 2^>nul ^| findstr /r /x "v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"') do set "NODE_VERSION=%%v"
+if not defined NODE_VERSION goto :use_bundled
+for /f "tokens=1,2 delims=v." %%a in ("%NODE_VERSION%") do set "NODE_MAJOR=%%a" & set "NODE_MINOR=%%b"
 if not defined NODE_MAJOR goto :use_bundled
 if %NODE_MAJOR% GEQ 24 goto :node_ok
-if %NODE_MAJOR% EQU 22 if defined NODE_MINOR if %NODE_MINOR% GEQ 15 goto :node_ok
-if %NODE_MAJOR% EQU 23 if defined NODE_MINOR if %NODE_MINOR% GEQ 8 goto :node_ok
+if %NODE_MAJOR% EQU 22 if defined NODE_MINOR if %NODE_MINOR% GEQ 19 goto :node_ok
 goto :use_bundled
 
 :node_ok
@@ -69,10 +71,10 @@ if (-not $node) {
     if ($localNode) {
         try {
             $version = & node --version 2>$null
-            if ($version -match '^v(\d+)\.(\d+)') {
+            if ($version -match '^v(\d+)\.(\d+)\.(\d+)$') {
                 $major = [int]$matches[1]
                 $minor = [int]$matches[2]
-                if (($major -eq 22 -and $minor -ge 15) -or ($major -eq 23 -and $minor -ge 8) -or $major -ge 24) {
+                if (($major -eq 22 -and $minor -ge 19) -or $major -ge 24) {
                     $node = 'node'
                 }
             }
@@ -102,12 +104,13 @@ if [ -n "$DSH_NODE" ] && [ -x "$DSH_NODE" ]; then
 fi
 if [ -z "$NODE" ] && command -v node >/dev/null 2>&1; then
   NODE_V=$(node --version 2>/dev/null)
-  MAJOR=$(printf '%s' "$NODE_V" | awk -F. '{ gsub(/^v/, "", $1); print $1 }')
-  MINOR=$(printf '%s' "$NODE_V" | awk -F. '{ print $2 }')
-  if { [ -n "$MAJOR" ] && [ "$MAJOR" -ge 24 ]; } 2>/dev/null || \
-     { [ "$MAJOR" -eq 22 ] && [ "$MINOR" -ge 15 ]; } 2>/dev/null || \
-     { [ "$MAJOR" -eq 23 ] && [ "$MINOR" -ge 8 ]; } 2>/dev/null; then
-    NODE="node"
+  if printf '%s\n' "$NODE_V" | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { exit 0 } { exit 1 }'; then
+    MAJOR=$(printf '%s' "$NODE_V" | awk -F. '{ gsub(/^v/, "", $1); print $1 }')
+    MINOR=$(printf '%s' "$NODE_V" | awk -F. '{ print $2 }')
+    if { [ -n "$MAJOR" ] && [ "$MAJOR" -ge 24 ]; } 2>/dev/null || \
+       { [ "$MAJOR" -eq 22 ] && [ "$MINOR" -ge 19 ]; } 2>/dev/null; then
+      NODE="node"
+    fi
   fi
 fi
 if [ -z "$NODE" ]; then
